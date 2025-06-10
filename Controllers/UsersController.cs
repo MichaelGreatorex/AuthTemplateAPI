@@ -1,7 +1,13 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿
+
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.Extensions.Configuration;
+using Microsoft.IdentityModel.Tokens;
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
 using AuthTemplateAPI.Models;
-using AuthTemplateAPI.Data;
-using Microsoft.EntityFrameworkCore;
 
 namespace AuthTemplateAPI.Controllers
 {
@@ -9,76 +15,137 @@ namespace AuthTemplateAPI.Controllers
     [Route("api/[controller]")]
     public class UsersController : ControllerBase
     {
-        private readonly AppDbContext _context;
+        private readonly UserManager<User> _userManager;
+        private readonly SignInManager<User> _signInManager;
+        private readonly IConfiguration _configuration;
 
-        public UsersController(AppDbContext context)
+        public UsersController(
+            UserManager<User> userManager,
+            SignInManager<User> signInManager,
+            IConfiguration configuration)
         {
-            _context = context;
+            _userManager = userManager;
+            _signInManager = signInManager;
+            _configuration = configuration;
         }
 
-        // CREATE
-        [HttpPost]
-        public async Task<IActionResult> Register([FromBody] User user)
+        // Registration (POST)
+        [HttpPost("register")]
+        public async Task<IActionResult> Register([FromBody] RegisterModel model)
         {
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
+            var user = new User
+            {
+                UserName = model.Email,
+                Email = model.Email,
+                Name = model.Name
+            };
 
-            _context.Users.Add(user);
-            await _context.SaveChangesAsync();
+            var result = await _userManager.CreateAsync(user, model.Password);
 
-            return Ok(new { message = "User registered successfully" });
+            if (result.Succeeded)
+                return Ok(new { message = "User registered successfully." });
+
+            return BadRequest(result.Errors);
         }
 
-        // READ ALL
-        [HttpGet]
-        public async Task<ActionResult<IEnumerable<User>>> GetUsers()
+        // Login (POST)
+        [HttpPost("login")]
+        public async Task<IActionResult> Login([FromBody] LoginModel model)
         {
-            return Ok(await _context.Users.ToListAsync());
-        }
-
-        // READ BY ID
-        [HttpGet("{id}")]
-        public async Task<ActionResult<User>> GetUser(int id)
-        {
-            var user = await _context.Users.FindAsync(id);
+            var user = await _userManager.FindByEmailAsync(model.Email);
             if (user == null)
-                return NotFound(new { message = "User not found" });
+                return Unauthorized(new { message = "Invalid credentials." });
+
+            var result = await _signInManager.CheckPasswordSignInAsync(user, model.Password, false);
+            if (!result.Succeeded)
+                return Unauthorized(new { message = "Invalid credentials." });
+
+            var token = GenerateJwtToken(user);
+            return Ok(new { token });
+        }
+
+        // GET all users
+        [HttpGet]
+        public IActionResult GetUsers()
+        {
+            var users = _userManager.Users.ToList();
+            return Ok(users);
+        }
+
+        // GET a specific user by Id
+        [HttpGet("{id}")]
+        public async Task<IActionResult> GetUser(string id)
+        {
+            var user = await _userManager.FindByIdAsync(id);
+            if (user == null)
+                return NotFound();
 
             return Ok(user);
         }
 
-        // UPDATE
+        // PUT to update user
         [HttpPut("{id}")]
-        public async Task<IActionResult> UpdateUser(int id, [FromBody] User updatedUser)
+        public async Task<IActionResult> UpdateUser(string id, [FromBody] UpdateUserModel model)
         {
-            if (id != updatedUser.Id)
-                return BadRequest(new { message = "ID mismatch" });
+            var user = await _userManager.FindByIdAsync(id);
+            if (user == null)
+                return NotFound();
 
-            var existingUser = await _context.Users.FindAsync(id);
-            if (existingUser == null)
-                return NotFound(new { message = "User not found" });
+            // Update user properties you want to allow updating
+            user.Name = model.Name ?? user.Name;
+            user.Email = model.Email ?? user.Email;
+            user.UserName = model.Email ?? user.UserName;
 
-            existingUser.Name = updatedUser.Name;
-            existingUser.Password = updatedUser.Password; // You might want to hash this in production
+            var result = await _userManager.UpdateAsync(user);
+            if (!result.Succeeded)
+                return BadRequest(result.Errors);
 
-            await _context.SaveChangesAsync();
-            return Ok(new { message = "User updated successfully" });
+            return NoContent();
         }
 
-        // DELETE
+        // DELETE user
         [HttpDelete("{id}")]
-        public async Task<IActionResult> DeleteUser(int id)
+        public async Task<IActionResult> DeleteUser(string id)
         {
-            var user = await _context.Users.FindAsync(id);
+            var user = await _userManager.FindByIdAsync(id);
             if (user == null)
-                return NotFound(new { message = "User not found" });
+                return NotFound();
 
-            _context.Users.Remove(user);
-            await _context.SaveChangesAsync();
+            var result = await _userManager.DeleteAsync(user);
+            if (!result.Succeeded)
+                return BadRequest(result.Errors);
 
-            return Ok(new { message = "User deleted successfully" });
+            return NoContent();
+        }
+
+        private string GenerateJwtToken(User user)
+        {
+            var claims = new[]
+            {
+                new Claim(JwtRegisteredClaimNames.Sub, user.Id),
+                new Claim(JwtRegisteredClaimNames.Email, user.Email),
+                new Claim("name", user.Name ?? "")
+            };
+
+            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_configuration["Jwt:Key"]));
+            var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+            var token = new JwtSecurityToken(
+                issuer: _configuration["Jwt:Issuer"],
+                audience: _configuration["Jwt:Audience"],
+                claims: claims,
+                expires: DateTime.Now.AddHours(1),
+                signingCredentials: creds
+            );
+
+            return new JwtSecurityTokenHandler().WriteToken(token);
         }
     }
+
+    // DTO for user update
+    public class UpdateUserModel
+    {
+        public string? Name { get; set; }
+        public string? Email { get; set; }
+    }
 }
-
-
